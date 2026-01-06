@@ -3,7 +3,8 @@ import tempfile
 import os
 from datetime import datetime
 from pathlib import Path
-import sys
+import json
+import base64
 
 from pdf_processor import process_pdf, get_financial_context
 from data_store import (
@@ -18,6 +19,68 @@ from data_store import (
     delete_chat_history
 )
 from claude_client import ClaudeClient
+
+
+# 영구 저장소 설정
+PERSISTENT_DATA_DIR = Path("persistent_data")
+PERSISTENT_DATA_DIR.mkdir(exist_ok=True)
+
+COMPANIES_FILE = PERSISTENT_DATA_DIR / "companies.json"
+PDF_STORAGE_DIR = PERSISTENT_DATA_DIR / "pdf_files"
+PDF_STORAGE_DIR.mkdir(exist_ok=True)
+
+
+def load_companies():
+    """저장된 회사 목록 로드"""
+    if COMPANIES_FILE.exists():
+        try:
+            with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+
+def save_companies(companies):
+    """회사 목록 저장"""
+    with open(COMPANIES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(companies, f, ensure_ascii=False, indent=2)
+
+
+def save_pdf_permanently(uploaded_file, company_name):
+    """PDF를 영구 저장소에 저장"""
+    company_dir = PDF_STORAGE_DIR / company_name
+    company_dir.mkdir(exist_ok=True)
+    
+    file_path = company_dir / uploaded_file.name
+    with open(file_path, 'wb') as f:
+        f.write(uploaded_file.getvalue())
+    
+    return file_path
+
+
+def get_stored_pdfs(company_name):
+    """저장된 PDF 파일 목록"""
+    company_dir = PDF_STORAGE_DIR / company_name
+    if not company_dir.exists():
+        return []
+    
+    return sorted([f.name for f in company_dir.glob("*.pdf")])
+
+
+def delete_pdf_file(company_name, filename):
+    """PDF 파일 삭제"""
+    file_path = PDF_STORAGE_DIR / company_name / filename
+    if file_path.exists():
+        file_path.unlink()
+
+
+def delete_company_folder(company_name):
+    """회사 폴더 전체 삭제"""
+    company_dir = PDF_STORAGE_DIR / company_name
+    if company_dir.exists():
+        import shutil
+        shutil.rmtree(company_dir)
 
 
 def init_session_state():
@@ -35,84 +98,66 @@ def init_session_state():
             st.session_state.client = None
     if "selected_companies" not in st.session_state:
         st.session_state.selected_companies = []
-    if "company_data" not in st.session_state:
-        st.session_state.company_data = {}
-
-
-def get_writable_dir():
-    """쓰기 가능한 디렉토리 반환 (Deploy 환경 대응)"""
-    # Streamlit Cloud 등에서는 /tmp 사용
-    if os.path.exists('/tmp') and os.access('/tmp', os.W_OK):
-        return Path('/tmp')
-    # 로컬 환경
-    return Path('.')
+    if "companies" not in st.session_state:
+        st.session_state.companies = load_companies()
 
 
 def get_company_folders():
-    """data 폴더 내의 회사별 폴더 목록 반환"""
-    base_dir = get_writable_dir()
-    data_dir = base_dir / "data"
-    
-    if not data_dir.exists():
-        try:
-            data_dir.mkdir(parents=True)
-        except Exception as e:
-            st.error(f"폴더 생성 실패: {e}")
-            return []
-    
-    try:
-        companies = [d.name for d in data_dir.iterdir() if d.is_dir()]
-        return sorted(companies)
-    except Exception as e:
-        st.error(f"폴더 읽기 실패: {e}")
-        return []
+    """저장된 회사 목록 반환"""
+    companies = load_companies()
+    return sorted(companies.keys())
+
+
+def add_company(company_name):
+    """새 회사 추가"""
+    companies = load_companies()
+    if company_name not in companies:
+        companies[company_name] = {
+            "created_at": datetime.now().isoformat(),
+            "file_count": 0
+        }
+        save_companies(companies)
+        st.session_state.companies = companies
+        return True
+    return False
+
+
+def update_company_file_count(company_name):
+    """회사의 파일 개수 업데이트"""
+    companies = load_companies()
+    if company_name in companies:
+        files = get_stored_pdfs(company_name)
+        companies[company_name]["file_count"] = len(files)
+        save_companies(companies)
 
 
 def save_company_file(uploaded_file, company_name):
-    """회사별 폴더에 PDF 저장 및 분석 (Deploy 환경 대응)"""
+    """PDF 저장 및 분석 (영구 저장)"""
     try:
-        base_dir = get_writable_dir()
-        company_dir = base_dir / "data" / company_name
-        company_dir.mkdir(parents=True, exist_ok=True)
+        # 1. PDF를 영구 저장소에 저장
+        pdf_path = save_pdf_permanently(uploaded_file, company_name)
         
-        # 임시 파일로 PDF 분석
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=str(base_dir)) as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_path = tmp_file.name
+        # 2. PDF 분석
+        data = process_pdf(str(pdf_path))
         
-        # PDF 분석
-        data = process_pdf(tmp_path)
-        
-        # 회사명 포함하여 저장
+        # 3. 분석 결과 저장
         data['company_name'] = company_name
         data['original_filename'] = uploaded_file.name
+        data['stored_path'] = str(pdf_path)
         save_extracted_data(data, f"{company_name}_{uploaded_file.name}")
         
-        # 임시 파일 삭제
-        try:
-            os.unlink(tmp_path)
-        except:
-            pass
+        # 4. 회사 파일 개수 업데이트
+        update_company_file_count(company_name)
         
         return True, None
         
     except Exception as e:
-        st.error(f"파일 처리 중 오류: {str(e)}")
         return False, str(e)
 
 
 def get_company_files(company_name):
-    """특정 회사의 저장된 파일 목록 반환"""
-    saved_files = list_saved_files()
-    company_files = []
-    
-    for filename in saved_files:
-        if filename.startswith(f"{company_name}_"):
-            # "회사명_" 부분 제거
-            original_name = filename[len(company_name)+1:]
-            company_files.append(original_name)
-    
-    return sorted(company_files)
+    """회사의 파일 목록 반환"""
+    return get_stored_pdfs(company_name)
 
 
 def get_selected_companies_context():
@@ -163,7 +208,7 @@ def main():
     )
 
     st.title("📊 재무제표 비교 분석 챗봇")
-    st.caption("회사별 재무제표를 업로드하고 비교 분석하세요")
+    st.caption("회사별 재무제표를 업로드하고 비교 분석하세요 | 💾 데이터 영구 저장")
 
     init_session_state()
 
@@ -178,6 +223,11 @@ def main():
         else:
             st.success("✅ API 연결됨")
 
+        # 저장소 정보 표시
+        companies = get_company_folders()
+        total_files = sum([len(get_company_files(c)) for c in companies])
+        st.caption(f"💾 {len(companies)}개 회사 | {total_files}개 파일 저장됨")
+
         st.divider()
 
         # 새 회사 추가
@@ -185,14 +235,11 @@ def main():
         new_company = st.text_input("회사명 입력", placeholder="예: 우리회사")
         
         if new_company and st.button("회사 추가", use_container_width=True):
-            try:
-                base_dir = get_writable_dir()
-                company_dir = base_dir / "data" / new_company
-                company_dir.mkdir(parents=True, exist_ok=True)
+            if add_company(new_company):
                 st.success(f"✅ '{new_company}' 추가됨")
                 st.rerun()
-            except Exception as e:
-                st.error(f"회사 추가 실패: {e}")
+            else:
+                st.warning("이미 존재하는 회사입니다")
 
         st.divider()
 
@@ -294,26 +341,29 @@ def main():
                                 st.text(file)
                             with col2:
                                 if st.button("🗑️", key=f"del_{company}_{file}"):
+                                    # PDF 파일 삭제
+                                    delete_pdf_file(company, file)
                                     # 분석 데이터 삭제
                                     delete_extracted_data(f"{company}_{file}")
+                                    # 파일 개수 업데이트
+                                    update_company_file_count(company)
                                     st.success(f"✅ {file} 삭제됨")
                                     st.rerun()
                         
                         # 회사 전체 삭제
                         if st.button(f"🗑️ {company} 전체 삭제", key=f"del_company_{company}"):
-                            # 해당 회사의 모든 파일 삭제
+                            # 모든 파일 삭제
                             for file in files:
                                 delete_extracted_data(f"{company}_{file}")
                             
-                            # 폴더 삭제 시도
-                            try:
-                                base_dir = get_writable_dir()
-                                company_dir = base_dir / "data" / company
-                                if company_dir.exists():
-                                    import shutil
-                                    shutil.rmtree(company_dir)
-                            except:
-                                pass
+                            # 폴더 삭제
+                            delete_company_folder(company)
+                            
+                            # 회사 목록에서 제거
+                            companies_dict = load_companies()
+                            if company in companies_dict:
+                                del companies_dict[company]
+                                save_companies(companies_dict)
                             
                             st.success(f"✅ {company} 전체 삭제됨")
                             st.rerun()
