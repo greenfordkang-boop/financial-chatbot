@@ -38,15 +38,28 @@ class ClaudeClient:
     ) -> str:
         """재무 데이터 컨텍스트와 함께 질문을 전송하고 답변을 받습니다."""
 
+        # ==== 컨텍스트/히스토리 길이 제한 (토큰 초과 방지) ====
+        # 너무 큰 컨텍스트가 들어오면 뒤에서부터 일정 길이만 사용
+        # (문자 기준이지만, 대략적인 토큰 수를 제한하는 효과가 있음)
+        MAX_CONTEXT_CHARS = 50_000  # 필요시 조정 가능
+        if len(financial_context) > MAX_CONTEXT_CHARS:
+            financial_context = financial_context[-MAX_CONTEXT_CHARS:]
+
+        # 대화 히스토리는 너무 오래된 것은 버리고, 최신 몇 개만 유지
+        MAX_HISTORY_MESSAGES = 30
+        trimmed_history: List[Dict[str, str]] = []
+        if conversation_history:
+            trimmed_history = conversation_history[-MAX_HISTORY_MESSAGES:]
+
         # 시스템 프롬프트에 재무 데이터 컨텍스트 추가
         full_system = f"{SYSTEM_PROMPT}\n\n=== 재무 데이터 ===\n{financial_context}"
 
         # 메시지 구성
-        messages = []
+        messages: List[Dict[str, str]] = []
 
-        # 이전 대화 히스토리 추가
-        if conversation_history:
-            messages.extend(conversation_history)
+        # 이전 대화 히스토리 추가 (길이 제한 적용된 것)
+        if trimmed_history:
+            messages.extend(trimmed_history)
 
         # 현재 질문 추가
         messages.append({"role": "user", "content": question})
