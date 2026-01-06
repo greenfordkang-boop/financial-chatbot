@@ -1,0 +1,23 @@
+# 환경 설정
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+
+# 데이터 (선택: 로컬 데이터 제외)
+data/extracted/
+data/history/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
