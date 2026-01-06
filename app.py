@@ -202,12 +202,12 @@ def load_session(session_id: str):
 
 def main():
     st.set_page_config(
-        page_title="재무제표 비교 분석 챗봇",
+        page_title="무엇이든 물어보세요?",
         page_icon="📊",
         layout="wide"
     )
 
-    st.title("📊 재무제표 비교 분석 챗봇")
+    st.title("📊 무엇이든 물어보세요?")
     st.caption("회사별 재무제표를 업로드하고 비교 분석하세요 | 💾 데이터 영구 저장")
 
     init_session_state()
