@@ -3,7 +3,6 @@ import tempfile
 import os
 from datetime import datetime
 from pathlib import Path
-import sys
 
 from pdf_processor import process_pdf, get_financial_context
 from data_store import (
@@ -39,80 +38,52 @@ def init_session_state():
         st.session_state.company_data = {}
 
 
-def get_writable_dir():
-    """쓰기 가능한 디렉토리 반환 (Deploy 환경 대응)"""
-    # Streamlit Cloud 등에서는 /tmp 사용
-    if os.path.exists('/tmp') and os.access('/tmp', os.W_OK):
-        return Path('/tmp')
-    # 로컬 환경
-    return Path('.')
-
-
 def get_company_folders():
     """data 폴더 내의 회사별 폴더 목록 반환"""
-    base_dir = get_writable_dir()
-    data_dir = base_dir / "data"
-    
+    data_dir = Path("data")
     if not data_dir.exists():
-        try:
-            data_dir.mkdir(parents=True)
-        except Exception as e:
-            st.error(f"폴더 생성 실패: {e}")
-            return []
-    
-    try:
-        companies = [d.name for d in data_dir.iterdir() if d.is_dir()]
-        return sorted(companies)
-    except Exception as e:
-        st.error(f"폴더 읽기 실패: {e}")
+        data_dir.mkdir(parents=True)
         return []
+    
+    companies = [d.name for d in data_dir.iterdir() if d.is_dir()]
+    return sorted(companies)
 
 
 def save_company_file(uploaded_file, company_name):
-    """회사별 폴더에 PDF 저장 및 분석 (Deploy 환경 대응)"""
+    """회사별 폴더에 PDF 저장 및 분석"""
+    company_dir = Path("data") / company_name
+    company_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_path = company_dir / uploaded_file.name
+    
+    # 파일 저장
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getvalue())
+    
+    # PDF 분석
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_path = tmp_file.name
+    
     try:
-        base_dir = get_writable_dir()
-        company_dir = base_dir / "data" / company_name
-        company_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 임시 파일로 PDF 분석
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=str(base_dir)) as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_path = tmp_file.name
-        
-        # PDF 분석
         data = process_pdf(tmp_path)
-        
-        # 회사명 포함하여 저장
+        # 회사명을 포함하여 저장
         data['company_name'] = company_name
-        data['original_filename'] = uploaded_file.name
         save_extracted_data(data, f"{company_name}_{uploaded_file.name}")
-        
-        # 임시 파일 삭제
-        try:
-            os.unlink(tmp_path)
-        except:
-            pass
-        
         return True, None
-        
     except Exception as e:
-        st.error(f"파일 처리 중 오류: {str(e)}")
         return False, str(e)
+    finally:
+        os.unlink(tmp_path)
 
 
 def get_company_files(company_name):
     """특정 회사의 저장된 파일 목록 반환"""
-    saved_files = list_saved_files()
-    company_files = []
+    company_dir = Path("data") / company_name
+    if not company_dir.exists():
+        return []
     
-    for filename in saved_files:
-        if filename.startswith(f"{company_name}_"):
-            # "회사명_" 부분 제거
-            original_name = filename[len(company_name)+1:]
-            company_files.append(original_name)
-    
-    return sorted(company_files)
+    return sorted([f.name for f in company_dir.glob("*.pdf")])
 
 
 def get_selected_companies_context():
@@ -174,7 +145,7 @@ def main():
         # API 키 상태 확인
         if st.session_state.client is None:
             st.error("⚠️ API 키가 설정되지 않았습니다")
-            st.info("Streamlit Cloud의 Secrets에서 ANTHROPIC_API_KEY를 설정하세요")
+            st.info("`.env` 파일에 ANTHROPIC_API_KEY를 설정하세요")
         else:
             st.success("✅ API 연결됨")
 
@@ -185,14 +156,10 @@ def main():
         new_company = st.text_input("회사명 입력", placeholder="예: 우리회사")
         
         if new_company and st.button("회사 추가", use_container_width=True):
-            try:
-                base_dir = get_writable_dir()
-                company_dir = base_dir / "data" / new_company
-                company_dir.mkdir(parents=True, exist_ok=True)
-                st.success(f"✅ '{new_company}' 추가됨")
-                st.rerun()
-            except Exception as e:
-                st.error(f"회사 추가 실패: {e}")
+            company_dir = Path("data") / new_company
+            company_dir.mkdir(parents=True, exist_ok=True)
+            st.success(f"✅ '{new_company}' 폴더 생성됨")
+            st.rerun()
 
         st.divider()
 
@@ -216,23 +183,14 @@ def main():
                     success_count = 0
                     
                     for idx, file in enumerate(uploaded_files):
-                        status_text = st.empty()
-                        status_text.text(f"분석 중: {file.name}")
-                        
                         success, error = save_company_file(file, selected_company)
                         if success:
                             success_count += 1
                         else:
                             st.error(f"❌ {file.name}: {error}")
-                        
                         progress_bar.progress((idx + 1) / len(uploaded_files))
-                        status_text.empty()
                     
-                    progress_bar.empty()
                     st.success(f"✅ {success_count}/{len(uploaded_files)}개 파일 분석 완료!")
-                    
-                    # 컨텍스트 자동 갱신
-                    st.session_state.financial_context = get_selected_companies_context()
                     st.rerun()
         else:
             st.info("먼저 회사를 추가하세요")
@@ -294,28 +252,16 @@ def main():
                                 st.text(file)
                             with col2:
                                 if st.button("🗑️", key=f"del_{company}_{file}"):
-                                    # 분석 데이터 삭제
+                                    file_path = Path("data") / company / file
+                                    file_path.unlink()
+                                    # 분석 데이터도 삭제
                                     delete_extracted_data(f"{company}_{file}")
-                                    st.success(f"✅ {file} 삭제됨")
                                     st.rerun()
                         
-                        # 회사 전체 삭제
+                        # 회사 폴더 전체 삭제
                         if st.button(f"🗑️ {company} 전체 삭제", key=f"del_company_{company}"):
-                            # 해당 회사의 모든 파일 삭제
-                            for file in files:
-                                delete_extracted_data(f"{company}_{file}")
-                            
-                            # 폴더 삭제 시도
-                            try:
-                                base_dir = get_writable_dir()
-                                company_dir = base_dir / "data" / company
-                                if company_dir.exists():
-                                    import shutil
-                                    shutil.rmtree(company_dir)
-                            except:
-                                pass
-                            
-                            st.success(f"✅ {company} 전체 삭제됨")
+                            import shutil
+                            shutil.rmtree(Path("data") / company)
                             st.rerun()
                     else:
                         st.caption("파일 없음")
@@ -368,7 +314,7 @@ def main():
         st.session_state.financial_context = get_selected_companies_context()
 
     # 데이터 없음 경고
-    if "재무 데이터가 없습니다" in st.session_state.financial_context or "저장된 재무 데이터가 없습니다" in st.session_state.financial_context:
+    if "재무 데이터가 없습니다" in st.session_state.financial_context:
         st.warning("📌 먼저 사이드바에서 회사를 추가하고 재무제표를 업로드하세요")
         
         # 예시 질문 표시
